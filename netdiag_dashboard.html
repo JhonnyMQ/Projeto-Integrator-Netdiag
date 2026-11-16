@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetDiag - Painel de Status da Rede</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+    background: #f4f4f2;
+    color: #1a1a1a;
+    padding: 32px 16px;
+  }
+  .container { max-width: 720px; margin: 0 auto; }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 { font-size: 20px; font-weight: 600; }
+  header p { font-size: 13px; color: #666; margin-top: 2px; }
+  .badges { display: flex; gap: 8px; }
+  .badge {
+    font-size: 12px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+  .badge-danger { background: #fcebeb; color: #791f1f; }
+  .badge-warning { background: #faeeda; color: #633806; }
+
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .summary-card {
+    background: #fff;
+    border-radius: 10px;
+    padding: 16px;
+    border: 1px solid #e5e4e0;
+  }
+  .summary-card .label { font-size: 12px; color: #666; margin-bottom: 6px; }
+  .summary-card .value { font-size: 26px; font-weight: 600; }
+  .value-ok { color: #27500a; }
+  .value-bad { color: #791f1f; }
+
+  section { margin-bottom: 24px; }
+  section h2 {
+    font-size: 13px;
+    color: #666;
+    font-weight: 500;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .device-list { display: flex; flex-direction: column; gap: 8px; }
+  .device {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #fff;
+    border: 1px solid #e5e4e0;
+    border-radius: 8px;
+    padding: 12px 16px;
+    transition: border-color 0.2s;
+  }
+  .device.status-danger { border-color: #f09595; background: #fdf4f4; }
+  .device.status-warning { border-color: #efc98f; background: #fdf9f0; }
+
+  .device-left { display: flex; align-items: center; gap: 10px; }
+  .dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #639922;
+    flex-shrink: 0;
+  }
+  .status-danger .dot { background: #e24b4a; }
+  .status-warning .dot { background: #ef9f27; }
+
+  .device-name { font-size: 14px; font-weight: 500; }
+  .device-status { font-size: 12px; color: #666; }
+  .status-danger .device-status { color: #a32d2d; }
+  .status-warning .device-status { color: #854f0b; }
+
+  .device button {
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #d3d1c7;
+    background: #fff;
+    cursor: pointer;
+    color: #444;
+  }
+  .device button:hover { background: #f4f4f2; }
+
+  .alerts { display: flex; flex-direction: column; gap: 6px; }
+  .alert {
+    padding: 10px 14px;
+    border-left: 3px solid #e24b4a;
+    background: #fcebeb;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  .alert.warning { border-left-color: #ef9f27; background: #faeeda; }
+  .alert .time { font-size: 11px; color: #666; margin-top: 4px; }
+  .alert p:first-child { color: #791f1f; }
+  .alert.warning p:first-child { color: #633806; }
+
+  .empty-alerts {
+    font-size: 13px;
+    color: #666;
+    text-align: center;
+    padding: 20px;
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #e5e4e0;
+  }
+
+  footer {
+    text-align: center;
+    font-size: 12px;
+    color: #999;
+    margin-top: 32px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div>
+      <h1>NetDiag</h1>
+      <p>Status da rede em tempo real (protótipo)</p>
+    </div>
+    <div class="badges" id="badges"></div>
+  </header>
+
+  <div class="summary">
+    <div class="summary-card">
+      <div class="label">Equipamentos</div>
+      <div class="value" id="total-count">6</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Online</div>
+      <div class="value value-ok" id="online-count">6</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Com problema</div>
+      <div class="value value-bad" id="problem-count">0</div>
+    </div>
+  </div>
+
+  <section>
+    <h2>Equipamentos</h2>
+    <div class="device-list" id="device-list"></div>
+  </section>
+
+  <section>
+    <h2>Alertas recentes</h2>
+    <div class="alerts" id="alerts"></div>
+  </section>
+
+  <footer>Protótipo de estudo — TCC Redes de Computadores</footer>
+</div>
+
+<script>
+  const devices = [
+    { id: 1, name: "Roteador principal", status: "ok" },
+    { id: 2, name: "Switch financeiro", status: "ok" },
+    { id: 3, name: "Switch produção", status: "ok", failMsg: "Sem resposta ao ping — possível falha de porta ou cabo" },
+    { id: 4, name: "Servidor de arquivos", status: "ok" },
+    { id: 5, name: "Link internet", status: "ok", failMsg: "Uso de banda acima de 90% nos últimos 10 min", failType: "warning" },
+    { id: 6, name: "PC financeiro 02", status: "ok" }
+  ];
+
+  const alerts = [];
+
+  function statusLabel(status) {
+    if (status === "danger") return "Offline";
+    if (status === "warning") return "Lentidão";
+    return "Online";
+  }
+
+  function render() {
+    const list = document.getElementById("device-list");
+    list.innerHTML = "";
+    devices.forEach(d => {
+      const div = document.createElement("div");
+      div.className = "device status-" + d.status;
+      div.innerHTML = `
+        <div class="device-left">
+          <span class="dot"></span>
+          <span class="device-name">${d.name}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="device-status">${statusLabel(d.status)}</span>
+          <button onclick="toggleDevice(${d.id})">${d.status === "ok" ? "Simular falha" : "Restaurar"}</button>
+        </div>
+      `;
+      list.appendChild(div);
+    });
+
+    const online = devices.filter(d => d.status === "ok").length;
+    const problems = devices.length - online;
+    document.getElementById("total-count").textContent = devices.length;
+    document.getElementById("online-count").textContent = online;
+    document.getElementById("problem-count").textContent = problems;
+
+    const badgesEl = document.getElementById("badges");
+    const critCount = devices.filter(d => d.status === "danger").length;
+    const warnCount = devices.filter(d => d.status === "warning").length;
+    badgesEl.innerHTML = "";
+    if (critCount > 0) badgesEl.innerHTML += `<span class="badge badge-danger">${critCount} crítico${critCount > 1 ? "s" : ""}</span>`;
+    if (warnCount > 0) badgesEl.innerHTML += `<span class="badge badge-warning">${warnCount} alerta${warnCount > 1 ? "s" : ""}</span>`;
+
+    const alertsEl = document.getElementById("alerts");
+    if (alerts.length === 0) {
+      alertsEl.innerHTML = `<div class="empty-alerts">Nenhum alerta no momento</div>`;
+    } else {
+      alertsEl.innerHTML = alerts.slice().reverse().map(a => `
+        <div class="alert ${a.type === "warning" ? "warning" : ""}">
+          <p>${a.message}</p>
+          <p class="time">${a.time}</p>
+        </div>
+      `).join("");
+    }
+  }
+
+  function toggleDevice(id) {
+    const d = devices.find(dev => dev.id === id);
+    if (!d) return;
+    const now = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+
+    if (d.status === "ok") {
+      d.status = d.failType === "warning" ? "warning" : "danger";
+      alerts.push({ message: `${d.name}: ${d.failMsg || "Falha detectada"}`, time: now, type: d.status });
+    } else {
+      d.status = "ok";
+      alerts.push({ message: `${d.name}: problema resolvido, equipamento normalizado`, time: now, type: "ok" });
+    }
+    render();
+  }
+
+  render();
+</script>
+</body>
+</html>
