@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 import socket
 import subprocess
+import ipaddress
 import platform
 import threading
 import re
@@ -269,6 +270,90 @@ def testar_portas_cftv(ip, timeout=0.3):
     return False
 
 
+def sondar_host_rede(ip):
+    """Verifica se o host responde via ping ou por portas TCP comuns (caso ICMP esteja bloqueado)."""
+    ok, ms = pingar_com_latencia(ip)
+    if ok:
+        return True, ms
+
+    # Fallback TCP para dispositivos que bloqueiam ICMP (câmeras, smartphones, servidores)
+    portas_comuns = [80, 443, 554, 8000, 37777, 22, 445, 8080, 5060]
+    for porta in portas_comuns:
+        try:
+            inicio = time.perf_counter()
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.25)
+            res = s.connect_ex((ip, porta))
+            s.close()
+            if res == 0:
+                latencia_tcp = max(1.0, (time.perf_counter() - inicio) * 1000.0)
+                return True, latencia_tcp
+        except Exception:
+            pass
+    return False, 0.0
+
+
+def expandir_alvo_rede(entrada):
+    """Converte uma entrada (ex: '192.168.19.', '192.168.19.0/24', '192.168.19.10') em lista de IPs."""
+    texto = entrada.strip()
+    if not texto:
+        return []
+
+    # Formato prefixo '192.168.19.'
+    if texto.endswith("."):
+        base = texto[:-1]
+        partes = base.split(".")
+        if len(partes) == 3 and all(p.isdigit() and 0 <= int(p) <= 255 for p in partes):
+            return [f"{base}.{h}" for h in range(1, 255)]
+        return []
+
+    # Formato CIDR '192.168.19.0/24' (limitado a no máximo /20 = 4094 hosts para não travar)
+    if "/" in texto:
+        try:
+            rede = ipaddress.ip_network(texto, strict=False)
+            if rede.version == 4 and rede.num_addresses <= 4096:
+                return [str(ip) for ip in rede.hosts()]
+        except Exception:
+            return []
+
+    # Formato IP único '192.168.19.10'
+    try:
+        ip_obj = ipaddress.ip_address(texto)
+        if ip_obj.version == 4:
+            return [str(ip_obj)]
+    except Exception:
+        pass
+
+    return []
+
+
+def normalizar_alvo_rede(entrada):
+    """Valida e normaliza a entrada de rede/IP para exibição e salvamento."""
+    texto = entrada.strip()
+    if not texto:
+        return None
+    if texto.endswith("."):
+        base = texto[:-1]
+        partes = base.split(".")
+        if len(partes) == 3 and all(p.isdigit() and 0 <= int(p) <= 255 for p in partes):
+            return f"{base}.0/24"
+        return None
+    if "/" in texto:
+        try:
+            rede = ipaddress.ip_network(texto, strict=False)
+            if rede.version == 4 and rede.num_addresses <= 4096:
+                return str(rede)
+        except Exception:
+            return None
+    try:
+        ip_obj = ipaddress.ip_address(texto)
+        if ip_obj.version == 4:
+            return str(ip_obj)
+    except Exception:
+        pass
+    return None
+
+
 def obter_tabela_arp():
     """Lê a tabela ARP do Windows eliminando IPs inválidos e multicast/broadcast."""
     tabela = {}
@@ -403,6 +488,7 @@ class NetDiagApp:
         self.linhas_widgets = {}
         self.pastas = {}            # nome_da_pasta -> {"ips": [lista de ips]}
         self.ip_para_pasta = {}     # ip -> nome_da_pasta (indice reverso, p/ consulta rapida)
+        self.redes_extras = []      # Lista de sub-redes/IPs extras (ex: ["192.168.19.0/24"])
         self.telegram = dict(TELEGRAM_CONFIG_PADRAO)
         self.primeira_varredura_concluida = False
         self.varrendo = False
@@ -431,6 +517,7 @@ class NetDiagApp:
             "nomes_personalizados": self.nomes_personalizados,
             "dispositivos_ignorados": self.dispositivos_ignorados,
             "pastas": self.pastas,
+            "redes_extras": self.redes_extras,
             "telegram": self.telegram,
             "tema": self.tema_preferido,
         }
@@ -448,6 +535,7 @@ class NetDiagApp:
                     self.nomes_personalizados = dados.get("nomes_personalizados", {})
                     self.dispositivos_ignorados = dados.get("dispositivos_ignorados", {})
                     self.pastas = dados.get("pastas", {})
+                    self.redes_extras = dados.get("redes_extras", [])
                     self.telegram.update(dados.get("telegram", {}))
                     self.tema_preferido = dados.get("tema", "escuro")
             except Exception:
@@ -766,8 +854,10 @@ class NetDiagApp:
         tk.Label(titulo_frame, text="● NetDiag CFTV", font=(FONTE_BASE, 18, "bold"),
                  bg=BG_JANELA, fg=TEXTO_PRIMARIO).pack(anchor="w")
 
-        info_rede = f"Rede: {self.prefixo_rede}0/24  —  Gateway/Roteador: {self.ip_gateway}  —  Host Local: {self.ip_local}"
-        tk.Label(titulo_frame, text=info_rede, font=(FONTE_BASE, 9), bg=BG_JANELA, fg=TEXTO_SECUNDARIO).pack(anchor="w")
+        extras_txt = f"  |  Extras: {', '.join(self.redes_extras)}" if self.redes_extras else ""
+        info_rede = f"Rede: {self.prefixo_rede}0/24{extras_txt}  —  Gateway: {self.ip_gateway}  —  Host: {self.ip_local}"
+        self.label_info_rede = tk.Label(titulo_frame, text=info_rede, font=(FONTE_BASE, 9), bg=BG_JANELA, fg=TEXTO_SECUNDARIO)
+        self.label_info_rede.pack(anchor="w")
 
         direita_frame = tk.Frame(frame, bg=BG_JANELA)
         direita_frame.pack(side="right")
@@ -827,8 +917,16 @@ class NetDiagApp:
         )
         self.botao_pastas.pack(side="left", expand=True, fill="both", padx=2)
 
+        self.botao_redes = tk.Button(
+            linha_botoes_extra, text="🌐 Sub-redes", font=(FONTE_BASE, 8, "bold"),
+            bg=BTN_BG_2, fg=COR_VERDE, activebackground=BG_HOVER,
+            activeforeground=COR_VERDE, relief="flat", bd=0,
+            cursor="hand2", command=self.abrir_janela_redes_extras
+        )
+        self.botao_redes.pack(side="left", expand=True, fill="both", padx=2)
+
         self.botao_config = tk.Button(
-            linha_botoes_extra, text="🔧 Configurações", font=(FONTE_BASE, 8, "bold"),
+            linha_botoes_extra, text="🔧 Config", font=(FONTE_BASE, 8, "bold"),
             bg=BTN_BG_2, fg=TEXTO_PRIMARIO, activebackground=BG_HOVER,
             activeforeground=TEXTO_PRIMARIO, relief="flat", bd=0,
             cursor="hand2", command=self.abrir_janela_configuracoes
@@ -924,23 +1022,36 @@ class NetDiagApp:
         thread = threading.Thread(target=self._varrer_rede_thread, daemon=True)
         thread.start()
 
+    def _obter_ips_para_varrer(self):
+        """Monta a lista única de todos os IPs da rede local + sub-redes/IPs extras configurados."""
+        alvos = set(f"{self.prefixo_rede}{h}" for h in range(1, 255))
+        for item in self.redes_extras:
+            for ip in expandir_alvo_rede(item):
+                alvos.add(ip)
+        for ip in self.dispositivos.keys():
+            if ip not in self.dispositivos_ignorados:
+                alvos.add(ip)
+        return sorted(alvos, key=lambda ip: tuple(int(p) for p in ip.split(".")))
+
     def _varrer_rede_thread(self):
         try:
             pings_respostas = {}
+            lista_ips = self._obter_ips_para_varrer()
+            workers = min(60, max(MAX_THREADS, len(lista_ips) // 8 + 1))
 
-            with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
                 futuros = {
-                    executor.submit(pingar_com_latencia, f"{self.prefixo_rede}{h}"): f"{self.prefixo_rede}{h}"
-                    for h in range(1, 255)
+                    executor.submit(sondar_host_rede, ip): ip
+                    for ip in lista_ips
                 }
                 for futuro in futuros:
                     ip = futuros[futuro]
                     try:
-                        pings_respostas[ip] = futuro.result(timeout=2.2)
+                        pings_respostas[ip] = futuro.result(timeout=3.5)
                     except Exception:
                         pings_respostas[ip] = (False, 0.0)
 
-            time.sleep(1.0)
+            time.sleep(0.5)
 
             tabela_arp = obter_tabela_arp()
             gateway_online, _ = pings_respostas.get(self.ip_gateway, (False, 0.0))
@@ -954,12 +1065,14 @@ class NetDiagApp:
                     mac = tabela_arp.get(ip, "")
 
                     if ip == self.ip_local:
-                        nome_detectado = "Este Notebook (Servidor NetDiag)"
+                        nome_detectado = "Este Computador (Servidor NetDiag)"
                     elif ip == self.ip_gateway:
-                        nome_detectado = "Roteador / Celular (Gateway)"
+                        nome_detectado = "Roteador / Gateway"
                     else:
                         cftv_ok = testar_portas_cftv(ip)
                         nome_detectado = identificar_marca_ou_mac(ip, mac, tem_cftv=cftv_ok)
+                        if not ip.startswith(self.prefixo_rede) and not mac and not cftv_ok:
+                            nome_detectado = "Dispositivo em Sub-rede Remota"
 
                     if ms < 120:
                         status_str = f"Conexão Estável ({ms:.0f} ms)"
@@ -1158,6 +1271,129 @@ class NetDiagApp:
                 ).pack(side="right", padx=8, pady=4)
 
         redesenhar_lista_ignorados()
+
+    # ---------- Gerenciamento de Sub-redes / IPs Extras ----------
+    def abrir_janela_redes_extras(self):
+        janela = tk.Toplevel(self.root)
+        janela.title("Sub-redes e IPs Extras")
+        janela.geometry("620x460")
+        janela.configure(bg=BG_JANELA)
+        janela.transient(self.root)
+        janela.grab_set()
+        janela.bind("<Escape>", lambda e: janela.destroy())
+
+        tk.Label(janela, text="SUB-REDES E IPs EXTRAS MONITORADOS", font=(FONTE_BASE, 10, "bold"),
+                 bg=BG_JANELA, fg=TEXTO_PRIMARIO).pack(anchor="w", padx=16, pady=(16, 4))
+        tk.Label(
+            janela,
+            text=(f"A rede local ({self.prefixo_rede}0/24) já é varrida automaticamente. Adicione aqui outras "
+                  "sub-redes ou IPs específicos (ex: 192.168.19.0/24 ou 192.168.19.10)."),
+            font=(FONTE_BASE, 8), bg=BG_JANELA, fg=TEXTO_SECUNDARIO, wraplength=580, justify="left"
+        ).pack(anchor="w", padx=16, pady=(0, 12))
+
+        frame_add = tk.Frame(janela, bg=BG_CARD, highlightbackground=BORDA, highlightthickness=1)
+        frame_add.pack(fill="x", padx=16, pady=(0, 12))
+
+        entry_alvo = tk.Entry(
+            frame_add, font=(FONTE_BASE, 9), bg=BG_CARD, fg=TEXTO_PRIMARIO,
+            insertbackground=TEXTO_PRIMARIO, relief="flat", bd=0
+        )
+        entry_alvo.pack(side="left", fill="x", expand=True, padx=10, pady=8)
+
+        def adicionar_alvo():
+            bruto = entry_alvo.get().strip()
+            normalizado = normalizar_alvo_rede(bruto)
+            if not normalizado:
+                messagebox.showwarning(
+                    "Formato inválido",
+                    "Informe um IP válido (ex: 192.168.19.10) ou sub-rede CIDR (ex: 192.168.19.0/24).",
+                    parent=janela
+                )
+                return
+            if normalizado == f"{self.prefixo_rede}0/24":
+                messagebox.showinfo(
+                    "Rede já incluída",
+                    f"A sub-rede {normalizado} já é a rede principal deste computador.",
+                    parent=janela
+                )
+                return
+            if normalizado in self.redes_extras:
+                messagebox.showwarning("Já cadastrado", f'"{normalizado}" já está na lista.', parent=janela)
+                return
+
+            self.redes_extras.append(normalizado)
+            self._salvar_configuracoes()
+            self._atualizar_cards_resumo()
+            entry_alvo.delete(0, "end")
+            redesenhar_lista()
+            self.disparar_varredura()
+
+        entry_alvo.bind("<Return>", lambda e: adicionar_alvo())
+
+        tk.Button(
+            frame_add, text="+ Adicionar", font=(FONTE_BASE, 8, "bold"),
+            bg=BTN_VERDE_BG, fg="#ffffff", activebackground=BTN_VERDE_HOVER,
+            activeforeground="#ffffff", relief="flat", bd=0, padx=14, pady=4,
+            cursor="hand2", command=adicionar_alvo
+        ).pack(side="right", padx=8, pady=6)
+
+        frame_lista = tk.Frame(janela, bg=BG_CARD, highlightbackground=BORDA, highlightthickness=1)
+        frame_lista.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        canvas = tk.Canvas(frame_lista, bg=BG_CARD, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame_lista, orient="vertical", command=canvas.yview)
+        conteudo_frame = tk.Frame(canvas, bg=BG_CARD)
+
+        conteudo_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        janela_id = canvas.create_window((0, 0), window=conteudo_frame, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(janela_id, width=e.width))
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def redesenhar_lista():
+            for w in conteudo_frame.winfo_children():
+                w.destroy()
+
+            # Linha fixa da rede principal
+            linha_local = tk.Frame(conteudo_frame, bg=BG_JANELA, highlightbackground=BORDA, highlightthickness=1)
+            linha_local.pack(fill="x", pady=3, padx=6)
+            tk.Label(linha_local, text=f"🏠 {self.prefixo_rede}0/24", font=(FONTE_BASE, 9, "bold"),
+                     bg=BG_JANELA, fg=TEXTO_PRIMARIO, anchor="w").pack(side="left", padx=10, pady=8)
+            tk.Label(linha_local, text="Rede principal (automática)", font=(FONTE_BASE, 8),
+                     bg=BG_JANELA, fg=TEXTO_SECUNDARIO).pack(side="right", padx=10, pady=8)
+
+            if not self.redes_extras:
+                tk.Label(conteudo_frame, text="Nenhuma sub-rede extra cadastrada ainda.\nExemplos: 192.168.19.0/24 ou 192.168.19.10",
+                         font=(FONTE_BASE, 8), bg=BG_CARD, fg=TEXTO_SECUNDARIO, justify="center").pack(pady=30)
+                return
+
+            for alvo in list(self.redes_extras):
+                qtd_ips = len(expandir_alvo_rede(alvo))
+                linha = tk.Frame(conteudo_frame, bg=BG_JANELA, highlightbackground=BORDA, highlightthickness=1)
+                linha.pack(fill="x", pady=3, padx=6)
+
+                tk.Label(linha, text=f"🌐 {alvo}", font=(FONTE_BASE, 9, "bold"), bg=BG_JANELA,
+                         fg=COR_VERDE, anchor="w").pack(side="left", padx=10, pady=8)
+                tk.Label(linha, text=f"{qtd_ips} host(s)", font=(FONTE_BASE, 8), bg=BG_JANELA,
+                         fg=TEXTO_SECUNDARIO).pack(side="left", padx=6, pady=8)
+
+                def remover(item=alvo):
+                    if item in self.redes_extras:
+                        self.redes_extras.remove(item)
+                        self._salvar_configuracoes()
+                        self._atualizar_cards_resumo()
+                        redesenhar_lista()
+
+                tk.Button(
+                    linha, text="Remover", font=(FONTE_BASE, 8),
+                    bg=BTN_PERIGO_BG, fg=COR_VERMELHO, activebackground=BTN_PERIGO_HOVER,
+                    activeforeground=COR_VERMELHO, relief="flat", bd=0, padx=10, pady=2,
+                    cursor="hand2", command=remover
+                ).pack(side="right", padx=8, pady=6)
+
+        redesenhar_lista()
 
     # ---------- Gerenciamento de Pastas / Grupos ----------
     def criar_pasta(self, nome):
@@ -1430,6 +1666,15 @@ class NetDiagApp:
 
         qtd_pastas = len(self.pastas)
         self.botao_pastas.config(text=f"📁 Pastas ({qtd_pastas})")
+
+        qtd_redes = len(self.redes_extras)
+        self.botao_redes.config(text=f"🌐 Sub-redes ({qtd_redes})")
+
+        if hasattr(self, "label_info_rede") and self.label_info_rede.winfo_exists():
+            extras_txt = f"  |  Extras: {', '.join(self.redes_extras)}" if self.redes_extras else ""
+            self.label_info_rede.config(
+                text=f"Rede: {self.prefixo_rede}0/24{extras_txt}  —  Gateway: {self.ip_gateway}  —  Host: {self.ip_local}"
+            )
 
         telegram_ligado = bool(self.telegram.get("ativo") and self.telegram.get("token") and self.telegram.get("chat_id"))
         self.telegram_status_label.config(
